@@ -61,4 +61,14 @@ export interface IServicelocator {
     body: SendPasswordResetOTPDto,
     response: Response
   ): Promise<any>;
+  requestPasswordReset(
+    request: any,
+    email: string,
+    response: Response
+  );
+  completePasswordReset(
+    request: any,
+    body: { kc_token: string; newPassword: string },
+    response: Response
+  );
 }

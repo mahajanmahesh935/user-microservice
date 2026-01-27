@@ -48,6 +48,8 @@ import {
   ResetUserPasswordDto,
   SendPasswordResetLinkDto,
   SendPasswordResetOTPDto,
+  RequestPasswordResetDto,
+  CompletePasswordResetDto,
 } from './dto/passwordReset.dto';
 import { API_RESPONSES } from '@utils/response.messages';
 import { LoggerUtil } from 'src/common/logger/LoggerUtil';
@@ -254,6 +256,46 @@ export class UserController {
     return await this.userAdapter
       .buildUserAdapter()
       .forgotPassword(request, reqBody, response);
+  }
+
+  @Post('/request-password-reset')
+  @ApiOkResponse({ description: 'Password reset email sent successfully.' })
+  @UsePipes(new ValidationPipe({ transform: true }))
+  @ApiBody({ type: RequestPasswordResetDto })
+  @ApiBadRequestResponse({ description: 'Invalid email or user not found' })
+  @ApiInternalServerErrorResponse({ description: 'Failed to send reset email' })
+  public async requestPasswordReset(
+    @Req() request: Request,
+    @Res() response: Response,
+    @Body() reqBody: RequestPasswordResetDto
+  ) {
+    return await this.userAdapter
+      .buildUserAdapter()
+      .requestPasswordReset(
+        request,
+        reqBody.email,
+        response
+      );
+  }
+
+  @Post('/complete-password-reset')
+  @ApiOkResponse({ description: 'Password reset completed successfully.' })
+  @UsePipes(new ValidationPipe({ transform: true }))
+  @ApiBody({ type: CompletePasswordResetDto })
+  @ApiBadRequestResponse({ description: 'Invalid token or password' })
+  @ApiInternalServerErrorResponse({ description: 'Failed to reset password' })
+  public async completePasswordReset(
+    @Req() request: Request,
+    @Res() response: Response,
+    @Body() reqBody: CompletePasswordResetDto
+  ) {
+    return await this.userAdapter
+      .buildUserAdapter()
+      .completePasswordReset(
+        request,
+        reqBody,
+        response
+      );
   }
 
   @UseFilters(new AllExceptionsFilter(APIID.USER_RESET_PASSWORD))

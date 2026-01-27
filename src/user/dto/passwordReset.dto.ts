@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, IsEmail, MinLength } from 'class-validator';
 
 export class SendPasswordResetLinkDto {
 
@@ -39,4 +39,29 @@ export class SendPasswordResetOTPDto {
   @IsString()
   @IsNotEmpty()
   username: string;
+}
+
+export class RequestPasswordResetDto {
+  @ApiProperty({ type: () => String, example: 'user@example.com' })
+  @IsString()
+  @IsNotEmpty()
+  @IsEmail()
+  email: string;
+}
+
+export class CompletePasswordResetDto {
+  @ApiProperty({ 
+    type: () => String, 
+    description: 'Keycloak action token from email link',
+    example: 'eyJhbGciOiJSUzI1NiIsInR5cCI6...' 
+  })
+  @IsString()
+  @IsNotEmpty()
+  kc_token: string;
+
+  @ApiProperty({ type: () => String, example: 'NewSecurePassword123!' })
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(8)
+  newPassword: string;
 }

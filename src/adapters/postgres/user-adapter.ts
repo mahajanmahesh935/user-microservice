@@ -430,6 +430,335 @@ export class PostgresUserService implements IServicelocator {
     }
   }
 
+  /**
+   * Request password reset using Keycloak's execute-actions-email
+   * This replaces the custom JWT token generation
+   */
+  public async requestPasswordReset(
+    request: any,
+    email: string,
+    response: Response
+  ) {
+    const apiId = APIID.USER_REQUEST_PASSWORD_RESET;
+    try {
+      // 1. Find user by email (can search by email or username)
+      const userData: any = await this.findUserDetails(null, email);
+      if (!userData) {
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.NOT_FOUND,
+          API_RESPONSES.USERNAME_NOT_FOUND,
+          HttpStatus.NOT_FOUND
+        );
+      }
+
+      // 2. Get Keycloak admin token
+      const keycloakResponse = await getKeycloakAdminToken();
+      if (!keycloakResponse || !keycloakResponse.data?.access_token) {
+        LoggerUtil.error(
+          `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+          'Failed to get Keycloak admin token',
+          apiId
+        );
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.INTERNAL_SERVER_ERROR,
+          'Failed to connect to Keycloak',
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+      const adminToken = keycloakResponse.data.access_token;
+
+      // 3. Find Keycloak user by email to get Keycloak userId
+      let keycloakUserId: string;
+      try {
+        const keycloakUserResponse = await checkIfEmailExistsInKeycloak(
+          userData.email || email,
+          adminToken
+        );
+        
+        // Check if the response is an error object
+        if (keycloakUserResponse instanceof Error || keycloakUserResponse?.response) {
+          LoggerUtil.error(
+            `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+            `Keycloak error: ${keycloakUserResponse?.message || keycloakUserResponse?.response?.data?.errorMessage || 'Unknown error'}`,
+            apiId
+          );
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.INTERNAL_SERVER_ERROR,
+            'Failed to find user in Keycloak',
+            HttpStatus.INTERNAL_SERVER_ERROR
+          );
+        }
+        
+        if (!keycloakUserResponse?.data || keycloakUserResponse.data.length === 0) {
+          LoggerUtil.error(
+            `${API_RESPONSES.NOT_FOUND}`,
+            `User ${email} not found in Keycloak`,
+            apiId
+          );
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.NOT_FOUND,
+            'User not found in Keycloak',
+            HttpStatus.NOT_FOUND
+          );
+        }
+        
+        // Get the first user's ID (assuming email is unique)
+        keycloakUserId = keycloakUserResponse.data[0].id;
+      } catch (keycloakError) {
+        LoggerUtil.error(
+          `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+          `Error finding user in Keycloak: ${keycloakError?.message || keycloakError}`,
+          apiId
+        );
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.INTERNAL_SERVER_ERROR,
+          `Failed to find user in Keycloak: ${keycloakError?.message || 'Unknown error'}`,
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+
+      // 4. Call Keycloak execute-actions-email endpoint
+      // Replace {realm} in KEYCLOAK_ADMIN if needed
+      const keycloakAdminPath = process.env.KEYCLOAK_ADMIN?.replace('{realm}', process.env.KEYCLOAK_REALM || 'master') || `/admin/realms/${process.env.KEYCLOAK_REALM || 'master'}/users`;
+      
+      const config = {
+        method: 'put',
+        url: `${process.env.KEYCLOAK}${keycloakAdminPath}/${keycloakUserId}/execute-actions-email`,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        data: JSON.stringify(['UPDATE_PASSWORD']),
+      };
+
+      try {
+        const executeResponse = await this.axios(config);
+        
+        // Success - Keycloak will send the email
+        // Note: execute-actions-email returns 204 No Content on success
+        if (executeResponse.status === 204 || executeResponse.status === 200) {
+          return APIResponse.success(
+            response,
+            apiId,
+            { email: email },
+            HttpStatus.OK,
+            'Password reset email sent successfully'
+          );
+        }
+        
+        // Unexpected response
+        LoggerUtil.error(
+          `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+          `Unexpected response from Keycloak: ${executeResponse.status}`,
+          apiId
+        );
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.INTERNAL_SERVER_ERROR,
+          'Unexpected response from Keycloak',
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      } catch (keycloakError) {
+        // Enhanced error logging
+        const errorStatus = keycloakError?.response?.status;
+        const errorData = keycloakError?.response?.data;
+        const errorMessage = errorData?.errorMessage || errorData?.error || keycloakError?.message || 'Unknown error';
+        const fullError = JSON.stringify({
+          status: errorStatus,
+          data: errorData,
+          message: errorMessage,
+          url: config.url,
+        });
+
+        LoggerUtil.error(
+          `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+          `Keycloak execute-actions-email error: ${fullError}`,
+          apiId
+        );
+
+        // Handle specific Keycloak errors
+        if (errorStatus === 404) {
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.NOT_FOUND,
+            'User not found in Keycloak',
+            HttpStatus.NOT_FOUND
+          );
+        }
+        if (errorStatus === 403) {
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.FORBIDDEN,
+            'Insufficient permissions. Admin user needs "manage-users" role from realm-management client.',
+            HttpStatus.FORBIDDEN
+          );
+        }
+        if (errorStatus === 400) {
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.BAD_REQUEST,
+            `Invalid request: ${errorMessage}`,
+            HttpStatus.BAD_REQUEST
+          );
+        }
+        if (errorStatus === 500 || errorStatus === 502 || errorStatus === 503) {
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.INTERNAL_SERVER_ERROR,
+            `Keycloak server error: ${errorMessage}. Please check Keycloak email configuration.`,
+            HttpStatus.INTERNAL_SERVER_ERROR
+          );
+        }
+
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.INTERNAL_SERVER_ERROR,
+          `Failed to send reset email: ${errorMessage}`,
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+    } catch (e) {
+      const errorMessage = e?.message || e?.response?.data?.errorMessage || e?.response?.data?.error || (typeof e === 'string' ? e : JSON.stringify(e)) || 'Unknown error';
+      const errorStack = e?.stack || '';
+      LoggerUtil.error(
+        `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+        `Error in requestPasswordReset: ${errorMessage}${errorStack ? `\nStack: ${errorStack}` : ''}`,
+        apiId
+      );
+      return APIResponse.error(
+        response,
+        apiId,
+        API_RESPONSES.INTERNAL_SERVER_ERROR,
+        `Error: ${errorMessage}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  /**
+   * Complete password reset using Keycloak's action-token endpoint
+   * This replaces the custom JWT validation and direct password reset
+   */
+  public async completePasswordReset(
+    request: any,
+    body: { kc_token: string; newPassword: string },
+    response: Response
+  ) {
+    const apiId = APIID.USER_COMPLETE_PASSWORD_RESET;
+    try {
+      // 1. Validate password strength (optional but recommended)
+      if (body.newPassword.length < 8) {
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.BAD_REQUEST,
+          'Password must be at least 8 characters long',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
+      // 2. Call Keycloak action-token endpoint
+      const realm = process.env.KEYCLOAK_REALM;
+      const config = {
+        method: 'post',
+        url: `${process.env.KEYCLOAK}realms/${realm}/login-actions/action-token`,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        data: new URLSearchParams({
+          key: body.kc_token,
+          newPassword: body.newPassword,
+        }).toString(),
+      };
+
+      try {
+        const keycloakResponse = await this.axios(config);
+
+        // 3. If successful, update user status in database (if needed)
+        if (keycloakResponse.status === 200 || keycloakResponse.status === 204) {
+          // Optional: You can extract userId from the token if needed
+          // For now, Keycloak handles everything
+
+          return APIResponse.success(
+            response,
+            apiId,
+            {},
+            HttpStatus.OK,
+            'Password reset successfully'
+          );
+        }
+      } catch (keycloakError) {
+        LoggerUtil.error(
+          `${API_RESPONSES.BAD_REQUEST}`,
+          `Keycloak action-token error: ${keycloakError?.response?.data?.error || keycloakError.message}`,
+          apiId
+        );
+
+        // Handle specific Keycloak errors
+        if (keycloakError.response?.status === 400) {
+          const errorMessage = keycloakError.response?.data?.error || 'Invalid token or password';
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.BAD_REQUEST,
+            errorMessage === 'invalid_token' 
+              ? 'Invalid or expired reset token' 
+              : errorMessage === 'password_policy_violation'
+              ? 'Password does not meet policy requirements'
+              : errorMessage,
+            HttpStatus.BAD_REQUEST
+          );
+        }
+        if (keycloakError.response?.status === 410) {
+          return APIResponse.error(
+            response,
+            apiId,
+            API_RESPONSES.LINK_EXPIRED,
+            'Reset token has expired. Please request a new one.',
+            HttpStatus.GONE
+          );
+        }
+
+        return APIResponse.error(
+          response,
+          apiId,
+          API_RESPONSES.INTERNAL_SERVER_ERROR,
+          `Failed to reset password: ${keycloakError?.response?.data?.error || 'Unknown error'}`,
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+    } catch (e) {
+      LoggerUtil.error(
+        `${API_RESPONSES.INTERNAL_SERVER_ERROR}`,
+        `Error: ${e.message}`,
+        apiId
+      );
+      return APIResponse.error(
+        response,
+        apiId,
+        API_RESPONSES.INTERNAL_SERVER_ERROR,
+        `Error: ${e.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
   async searchUser(
     tenantId: string,
     request: any,

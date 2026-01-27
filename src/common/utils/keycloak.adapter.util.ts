@@ -264,9 +264,11 @@ async function updateUserInKeyCloak(
 
 async function checkIfEmailExistsInKeycloak(email, token) {
   const axios = require('axios');
+  // Replace {realm} in KEYCLOAK_ADMIN if needed
+  const keycloakAdminPath = process.env.KEYCLOAK_ADMIN?.replace('{realm}', process.env.KEYCLOAK_REALM || 'master') || `/admin/realms/${process.env.KEYCLOAK_REALM || 'master'}/users`;
   const config = {
     method: 'get',
-    url: process.env.KEYCLOAK + process.env.KEYCLOAK_ADMIN + `?email=${email}`,
+    url: process.env.KEYCLOAK + keycloakAdminPath + `?email=${encodeURIComponent(email)}`,
     headers: {
       'Content-Type': 'application/json',
       Authorization: 'Bearer ' + token,
@@ -279,7 +281,7 @@ async function checkIfEmailExistsInKeycloak(email, token) {
   } catch (e) {
     LoggerUtil.error(
       `${API_RESPONSES.SERVER_ERROR}`,
-      `Error: "Keycloak error - email" ${e.message},`
+      `Error: "Keycloak error - email" ${e?.message || e?.response?.data?.errorMessage || 'Unknown error'},`
     );
     return e;
   }
